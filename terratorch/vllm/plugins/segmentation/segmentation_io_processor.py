@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import affine
 import base64
 import copy
 import logging
@@ -104,6 +105,7 @@ class SegmentationIOProcessor(IOProcessor):
         self.tiled_inference_parameters = self._init_tiled_inference_parameters_info()
         self.batch_size = 1
         self.requests_cache: dict[str, SegmentationRequestInfo] = {}
+        self.serialized_requests_cache: dict[str, Any] = {}
 
     def _init_tiled_inference_parameters_info(self) -> TiledInferenceParameters:
         if "tiled_inference_parameters" in self.model_config["model"]["init_args"]:
@@ -499,3 +501,39 @@ class SegmentationIOProcessor(IOProcessor):
         )
 
         return RequestOutput(data_format=request_info.out_data_format, data=out_data, request_id=request_id)
+
+    def get_request_metadata(self, request_id: str) -> dict | None:
+        base_id = request_id.rsplit("-", 1)[0]
+
+        if base_id in self.serialized_requests_cache:
+            # Avoid serializing twice for requests with multiple tiles
+            return self.serialized_requests_cache[base_id]
+
+        if base_id in self.requests_cache:
+            ret = self.requests_cache[base_id].model_dump()
+
+            meta = ret["metadata"]
+            if meta.get("crs") is not None:
+                ret["metadata"]["crs"] = meta["crs"].to_wkt()
+            if meta.get("transform") is not None:
+                ret["metadata"]["transform"] = list(meta["transform"])
+
+            self.serialized_requests_cache[base_id] = ret
+            return ret
+
+        return None
+
+    def update_request_metadata(self, request_id: str, metadata: dict | None):
+        base_id = request_id.rsplit("-", 1)[0]
+
+        # Avoid de-serializing more than once for requests with multiple tiles
+        if metadata and base_id not in self.requests_cache:
+            meta = metadata.get("metadata", None)
+            if meta:
+                if "crs" in meta and isinstance(meta["crs"], str):
+                    meta["crs"] = rasterio.CRS.from_wkt(meta["crs"])
+                if "transform" in meta and isinstance(meta["transform"], list):
+                    meta["transform"] = affine.Affine(*meta["transform"])
+                metadata["metadata"] = meta
+
+            self.requests_cache[base_id] = SegmentationRequestInfo.model_validate(metadata)
