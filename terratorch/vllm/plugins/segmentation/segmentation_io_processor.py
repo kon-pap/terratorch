@@ -15,7 +15,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Optional, overload
+from typing import Any, Optional, overload, Union
 
 import numpy as np
 import rasterio
@@ -182,7 +182,7 @@ class SegmentationIOProcessor(IOProcessor):
         self,
         file_path: str,
         path_type: str,
-    ) -> tuple[np.ndarray, dict, tuple[float, float]]:
+    ) -> tuple[np.ndarray, dict, Union[tuple[float, float] | None]]:
         """Read all bands from *file_path* and return image + meta info.
 
         Args:
