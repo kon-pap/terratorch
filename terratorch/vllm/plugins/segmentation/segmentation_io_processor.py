@@ -503,6 +503,21 @@ class SegmentationIOProcessor(IOProcessor):
         return RequestOutput(data_format=request_info.out_data_format, data=out_data, request_id=request_id)
 
     def get_request_metadata(self, request_id: str) -> dict | None:
+        """Export the request state saved by :meth:`pre_process` in a serializable form.
+
+        Used when pre- and post-processing run on different vLLM instances. The returned
+        dict is sent to the post-processing instance and restored there by
+        :meth:`update_request_metadata`.
+
+        Args:
+            request_id: id of a single prompt (tile), in the form ``<request_id>-<tile_index>``.
+
+        Returns:
+            msgpack-serializable dict of the :class:`SegmentationRequestInfo`, or None if
+            the request is unknown.
+        """
+        # vLLM suffixes the request id with the prompt index, while pre_process caches
+        # the request info under the original request id.
         base_id = request_id.rsplit("-", 1)[0]
 
         if base_id in self.serialized_requests_cache:
@@ -512,6 +527,8 @@ class SegmentationIOProcessor(IOProcessor):
         if base_id in self.requests_cache:
             ret = self.requests_cache[base_id].model_dump()
 
+            # rasterio CRS and Affine objects are not msgpack-serializable:
+            # send the CRS as WKT and the transform as a flat list of coefficients.
             meta = ret["metadata"]
             if meta.get("crs") is not None:
                 ret["metadata"]["crs"] = meta["crs"].to_wkt()
@@ -524,16 +541,28 @@ class SegmentationIOProcessor(IOProcessor):
         return None
 
     def update_request_metadata(self, request_id: str, metadata: dict | None):
+        """Restore the request state exported by :meth:`get_request_metadata`.
+
+        Called on the post-processing instance once per prompt (tile), before
+        :meth:`post_process` runs for the whole request.
+
+        Args:
+            request_id: id of a single prompt (tile), in the form ``<request_id>-<tile_index>``.
+            metadata: dict returned by :meth:`get_request_metadata` on the pre-processing instance.
+        """
         base_id = request_id.rsplit("-", 1)[0]
 
         # Avoid de-serializing more than once for requests with multiple tiles
         if metadata and base_id not in self.requests_cache:
             meta = metadata.get("metadata", None)
             if meta:
+                # Rebuild the rasterio objects that get_request_metadata flattened
                 if "crs" in meta and isinstance(meta["crs"], str):
                     meta["crs"] = rasterio.CRS.from_wkt(meta["crs"])
                 if "transform" in meta and isinstance(meta["transform"], list):
                     meta["transform"] = affine.Affine(*meta["transform"])
                 metadata["metadata"] = meta
+
+            # Cached under the original request id, which is what post_process looks up
 
             self.requests_cache[base_id] = SegmentationRequestInfo.model_validate(metadata)
